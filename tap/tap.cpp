@@ -591,10 +591,82 @@ static void Clock(Surface& b, wux::Controls::TextBlock const& x, Config const& c
     else { Keep(b, x, P::ForegroundProperty()); x.Foreground(wux::Media::SolidColorBrush(Rgb(c.clockColor, 255))); }
 }
 
+thread_local std::vector<winrt::weak_ref<wux::UIElement>> t_nudged;
+thread_local ULONGLONG t_nudgeUntil = 0;
+thread_local bool t_flip = false;
+thread_local wux::Media::CompositionTarget::Rendering_revoker t_frames;
+
+static void Nudge()
+{
+    auto dq = winrt::Windows::System::DispatcherQueue::GetForCurrentThread();
+    std::vector<std::shared_ptr<Surface>> mine;
+    {
+        std::lock_guard l(g_lock);
+        for (auto& s : g_surfaces)
+            if (s->dq == dq && (s->target < 0 || g_targets[s->target].kind == Kind::Glass)) mine.push_back(s);
+    }
+    std::vector<winrt::weak_ref<wux::UIElement>> els;
+    for (auto& s : mine) try {
+        auto fe = s->el.get();
+        if (!fe || fe.Opacity() < 0.99) continue;
+        wux::DependencyObject e = fe;
+        while (s->target < 0 && e && winrt::get_class_name(e) != L"Taskbar.TaskbarFrame") e = VisualTreeHelper::GetParent(e);
+        auto root = s->target < 0 && e ? VisualTreeHelper::GetParent(e).try_as<wux::UIElement>() : fe;
+        if (root) els.push_back(winrt::make_weak(root));
+        if (auto pill = s->target < 0 && root ? Find(root, L"GlassTrayPill") : nullptr) {
+            els.push_back(winrt::make_weak(pill.as<wux::UIElement>()));
+            for (auto ch : pill.as<wux::Controls::Panel>().Children()) els.push_back(winrt::make_weak(ch));
+        }
+    } catch (...) {}
+    if (els.empty()) return;
+    t_nudged = std::move(els);
+    t_nudgeUntil = GetTickCount64() + 700;
+    if (t_frames) return;
+    t_frames = wux::Media::CompositionTarget::Rendering(winrt::auto_revoke, [](auto&&, auto&&) {
+        bool done = GetTickCount64() > t_nudgeUntil;
+        t_flip = !t_flip;
+        for (auto& w : t_nudged) try {
+            if (auto e = w.get()) e.Opacity(done ? 1 : t_flip ? 0.999 : 0.998);
+        } catch (...) {}
+        if (done) t_frames = {};
+    });
+}
+
+static bool OverVisibleBar(RECT const* wr)
+{
+    for (auto cls : { L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd" })
+        for (HWND t = FindWindowExW(nullptr, nullptr, cls, nullptr); t; t = FindWindowExW(nullptr, t, cls, nullptr)) {
+            RECT tr, vis, hit;
+            MONITORINFO mi{ sizeof(mi) };
+            if (!GetWindowRect(t, &tr) || !GetMonitorInfoW(MonitorFromWindow(t, MONITOR_DEFAULTTONEAREST), &mi)) continue;
+            if (IntersectRect(&vis, &tr, &mi.rcMonitor) && vis.bottom - vis.top > 8 && (!wr || IntersectRect(&hit, &vis, wr))) return true;
+        }
+    return false;
+}
+
+static void CALLBACK OnWinEvent(HWINEVENTHOOK, DWORD ev, HWND w, LONG obj, LONG, DWORD, DWORD)
+{
+    if (obj != OBJID_WINDOW || !w || GetAncestor(w, GA_ROOT) != w) return;
+    RECT wr;
+    if (ev == EVENT_OBJECT_HIDE && !GetWindowRect(w, &wr)) return;
+    if (OverVisibleBar(ev == EVENT_OBJECT_HIDE ? &wr : nullptr)) Nudge();
+}
+
+thread_local bool t_watching = false;
+
+static void WatchWindows()
+{
+    if (t_watching) return;
+    t_watching = true;
+    SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, nullptr, OnWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
+    SetWinEventHook(EVENT_OBJECT_HIDE, EVENT_OBJECT_HIDE, nullptr, OnWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
+}
+
 static void Apply(Surface& b) try
 {
     auto bg = b.el.get();
     if (!bg) return;
+    WatchWindows();
     Config c;
     { std::lock_guard l(g_lock); c = g_cfg; }
 

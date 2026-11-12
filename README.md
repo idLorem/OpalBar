@@ -2,6 +2,8 @@
 
 Glass taskbar for Windows 11. Restyles the stock taskbar in place: floating rounded bar, blur, tint, matching flyouts.
 
+![OpalBar settings](assets/settings.png)
+
 ## Install
 
 Download `OpalBarInstall.exe` from [Releases](https://github.com/idLorem/OpalBar/releases) and run it. Settings open from the OpalBar shortcut on the desktop.
