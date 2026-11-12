@@ -153,7 +153,7 @@ struct GlassBrush : wux::Media::XamlCompositionBrushBaseT<GlassBrush> {
         if (CompositionBrush()) return;
         try {
             auto blurFx = winrt::make<Effect>(CLSID_D2D1GaussianBlur, std::vector<wf::IInspectable>{
-                PV::CreateSingle(blur), PV::CreateUInt32(1), PV::CreateUInt32(1) },
+                PV::CreateSingle(blur), PV::CreateUInt32(0), PV::CreateUInt32(1) },
                 std::vector<wge::IGraphicsEffectSource>{ wuc::CompositionEffectSourceParameter(L"Backdrop") });
             auto flood = winrt::make<Effect>(CLSID_D2D1Flood, std::vector<wf::IInspectable>{
                 PV::CreateSingleArray({ tint.R / 255.f, tint.G / 255.f, tint.B / 255.f, tint.A / 255.f }) });
