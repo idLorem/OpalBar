@@ -10,6 +10,7 @@ namespace Gdiplus { using std::min; using std::max; }
 #include <gdiplus.h>
 #include <shellapi.h>
 #include <shlwapi.h>
+#include <shlobj.h>
 #include <urlmon.h>
 #include <cmath>
 #include <cwctype>
@@ -100,6 +101,25 @@ static const wchar_t* const kRu[][2] = {
     { L"New version available: ", L"Доступна версия " },
     { L"Could not download the update", L"Не удалось скачать обновление" },
     { L"OpalBar Settings", L"Настройки OpalBar" },
+    { L"Details", L"Детали" },
+    { L"Glide animation", L"Анимация сдвига" },
+    { L"Rim color", L"Цвет ободка" },
+    { L"Rim width", L"Толщина ободка" },
+    { L"Shadow", L"Тень" },
+    { L"Hover color", L"Цвет подсветки" },
+    { L"Hover brightness", L"Яркость подсветки" },
+    { L"Running indicator", L"Индикатор запущенных" },
+    { L"Indicator color", L"Цвет индикатора" },
+    { L"Clock size", L"Размер часов" },
+    { L"Bold clock", L"Жирные часы" },
+    { L"Clock color", L"Цвет часов" },
+    { L"Reload", L"Перезапуск" },
+    { L"Uninstall", L"Удалить" },
+    { L"Tray icon", L"Значок в трее" },
+    { L"Restarting Explorer…", L"Перезапускаю проводник…" },
+    { L"Remove OpalBar from this PC? Your settings and presets will be deleted. Explorer will restart.",
+      L"Удалить OpalBar с этого компьютера? Настройки и пресеты будут удалены. Проводник перезапустится." },
+    { L"%.0f ms", L"%.0f мс" },
 };
 static const wchar_t* Tr(const wchar_t* en)
 {
@@ -137,19 +157,36 @@ static std::vector<Item> g_items = {
     { kButton, nullptr, L"Apply", 0, 0, 0, 0, nullptr, 1 },
     { kButton, nullptr, L"Русский", 0, 0, 0, 0, nullptr, 1 },
     { kSlider, nullptr, L"Bar height", 48 - 2 * cfg::MarginV.max, 48 - 2 * cfg::MarginV.min, 2, 48 - 2 * cfg::MarginV.def, L"%.0f px", 1 },
+    { kButton, nullptr, L"Reload", 0, 0, 0, 0, nullptr, 1 },
+    { kButton, nullptr, L"Uninstall", 0, 0, 0, 0, nullptr, 1 },
+    Slider(cfg::AnimationTime, L"Glide animation", 10, L"%.0f ms", 1),
+    { kColor, cfg::RimColorKey, L"Rim color", 0, 0, 0, cfg::RimColorDef, nullptr, 1 },
+    Slider(cfg::RimWidth, L"Rim width", 0.1, L"%.1f px", 1),
+    Slider(cfg::Shadow, L"Shadow", 0.01, L"%.0f %%", 100),
+    { kColor, cfg::HoverColorKey, L"Hover color", 0, 0, 0, cfg::Stock, nullptr, 1 },
+    Slider(cfg::HoverStrength, L"Hover brightness", 0.05, L"%.0f %%", 100),
+    { kToggle, cfg::ShowIndicator.key, L"Running indicator", 0, 1, 1, cfg::ShowIndicator.def, nullptr, 1 },
+    { kColor, cfg::IndicatorColorKey, L"Indicator color", 0, 0, 0, cfg::Stock, nullptr, 1 },
+    Slider(cfg::ClockSize, L"Clock size", 0.05, L"%.0f %%", 100),
+    { kToggle, cfg::ClockBold.key, L"Bold clock", 0, 1, 1, cfg::ClockBold.def, nullptr, 1 },
+    { kColor, cfg::ClockColorKey, L"Clock color", 0, 0, 0, cfg::Stock, nullptr, 1 },
+    { kToggle, nullptr, L"Tray icon", 0, 1, 1, 1, nullptr, 1 },
 };
 enum { iDynamic, iFull, iWidth, iPadding, iRadius, iHl, iBlur, iRefraction, iSpecular, iGlow, iTintOpacity, iTint, iAuto,
        iAutostart, iExport, iImport, iReset, iBgWall, iBgImage, iBgColor, iUpdate, iPresets, iEnabled, iPanelTint, iOffset,
-       iCode, iApply, iLang, iHeight, iCount };
-static_assert(iCount <= 32, "g_pending is a 32-bit mask");
+       iCode, iApply, iLang, iHeight, iReload, iUninstall, iAnim, iRimColor, iRimWidth, iShadow, iHoverColor, iHover,
+       iIndicator, iIndColor, iClockSize, iClockBold, iClockColor, iTray, iCount };
+static_assert(iCount <= 64, "g_pending is a 64-bit mask");
 static const int kCoded[] = { iDynamic, iFull, iWidth, iPadding, iRadius, iHl, iBlur, iRefraction, iSpecular, iGlow,
-                              iTintOpacity, iTint, iPanelTint, iOffset, iHeight };
+                              iTintOpacity, iTint, iPanelTint, iOffset, iHeight, iAnim, iRimColor, iRimWidth, iShadow,
+                              iHoverColor, iHover, iIndicator, iIndColor, iClockSize, iClockBold, iClockColor };
+constexpr int kFirstOptional = 12;
 
 static std::wstring g_dir, g_ini;
-static float g_s = 1;
+static float g_s = 1, g_fit = 1;
 static int g_focus = 0, g_hover = -1, g_drag = -1;
 static bool g_keyboard = false;
-static unsigned g_pending = 0;
+static unsigned long long g_pending = 0;
 static std::unique_ptr<Bitmap> g_strip;
 static std::unique_ptr<Bitmap> g_base, g_back;
 static std::wstring g_toast;
@@ -182,15 +219,18 @@ static void Load()
         if (!it.key) continue;
         wchar_t b[64];
         GetPrivateProfileStringW(L"Taskbar", it.key, L"", b, 64, g_ini.c_str());
-        if (it.kind == kColor) it.v = *b ? (double)wcstoul(b + (*b == L'#'), nullptr, 16) : it.def;
+        if (it.kind == kColor) it.v = *b ? (double)(wcstoul(b + (*b == L'#'), nullptr, 16) & 0xFFFFFF) : it.def;
         else it.v = (*b ? std::clamp(_wtof(b), it.min, it.max) : it.def) + 0.0;
     }
     V(iAutostart) = RegGetValueW(HKEY_CURRENT_USER, app::RunKey, app::Name, RRF_RT_REG_SZ, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
     V(iEnabled) = GetPrivateProfileIntW(L"App", L"Enabled", 1, g_ini.c_str()) != 0;
+    V(iTray) = GetPrivateProfileIntW(L"App", L"TrayIcon", 1, g_ini.c_str()) != 0;
     wchar_t b[32];
     GetPrivateProfileStringW(L"Taskbar", cfg::MarginV.key, L"", b, 32, g_ini.c_str());
     V(iHeight) = 48 - 2 * std::round(*b ? std::clamp(_wtof(b), cfg::MarginV.min, cfg::MarginV.max) : cfg::MarginV.def);
 }
+
+static void ReloadShell();
 
 static void WriteItem(int i)
 {
@@ -211,7 +251,12 @@ static void WriteItem(int i)
     if (i == iEnabled) {
         WritePrivateProfileStringW(L"App", L"Enabled", it.v ? L"1" : L"0", g_ini.c_str());
         if (it.v) ShellExecuteW(nullptr, nullptr, (g_dir + app::LoaderExe).c_str(), nullptr, g_dir.c_str(), SW_HIDE);
-        else { app::StopLoader(); app::RestartShell(); }
+        else ReloadShell();
+        return;
+    }
+    if (i == iTray) {
+        WritePrivateProfileStringW(L"App", L"TrayIcon", it.v ? L"1" : L"0", g_ini.c_str());
+        if (HWND t = FindWindowW(app::TrayClass, nullptr)) PostMessageW(t, app::TrayChanged, 0, 0);
         return;
     }
     if (i == iHeight) {
@@ -220,6 +265,7 @@ static void WriteItem(int i)
         return;
     }
     if (!it.key) return;
+    if (it.kind == kColor && it.v < 0) { WritePrivateProfileStringW(L"Taskbar", it.key, nullptr, g_ini.c_str()); return; }
     if (it.kind == kColor) swprintf_s(b, L"#%06X", (unsigned)it.v);
     else swprintf_s(b, L"%g", it.v);
     WritePrivateProfileStringW(L"Taskbar", it.key, b, g_ini.c_str());
@@ -233,7 +279,7 @@ static void Change(HWND w, int i, double v)
     v += 0.0;
     if (v == it.v) return;
     it.v = v;
-    g_pending |= 1u << i;
+    g_pending |= 1ull << i;
     SetTimer(w, 1, 120, nullptr);
     InvalidateRect(w, nullptr, FALSE);
     if (i == iHeight) Change(w, iOffset, V(iOffset));
@@ -248,7 +294,11 @@ static std::wstring Encode()
         auto& it = g_items[i];
         if (it.kind == kSlider) { auto n = (unsigned)std::lround((it.v - it.min) / it.step); d.push_back(BYTE(n >> 8)); d.push_back(BYTE(n)); }
         else if (it.kind == kToggle) d.push_back(it.v != 0);
-        else { auto c = (unsigned)it.v; d.push_back(BYTE(c >> 16)); d.push_back(BYTE(c >> 8)); d.push_back(BYTE(c)); }
+        else {
+            auto c = (unsigned)std::max(0.0, it.v);
+            if (it.def < 0) d.push_back(it.v < 0);
+            d.push_back(BYTE(c >> 16)); d.push_back(BYTE(c >> 8)); d.push_back(BYTE(c));
+        }
     }
     BYTE sum = 0x5A;
     for (BYTE b : d) sum = BYTE(sum * 31 + b);
@@ -269,17 +319,20 @@ static bool Parse(std::wstring code, std::vector<double>& vals)
     for (DWORD i = 0; i + 1 < n; i++) sum = BYTE(sum * 31 + d[i]);
     if (sum != d[n - 1]) return false;
     DWORD at = 0;
-    for (int i : kCoded) {
+    for (int k = 0; k < (int)std::size(kCoded); k++) {
+        int i = kCoded[k];
         auto& it = g_items[i];
-        if (at == n - 1 && (i == iPanelTint || i == iOffset || i == iHeight)) {
-            vals.push_back(i == iOffset ? 0 : i == iHeight ? it.def : vals[std::find(std::begin(kCoded), std::end(kCoded), iTintOpacity) - std::begin(kCoded)]);
+        if (at == n - 1 && k >= kFirstOptional) {
+            vals.push_back(i == iPanelTint ? vals[std::find(std::begin(kCoded), std::end(kCoded), iTintOpacity) - std::begin(kCoded)] : it.def);
             continue;
         }
-        DWORD need = it.kind == kSlider ? 2 : it.kind == kToggle ? 1 : 3;
+        bool autoColor = it.kind == kColor && it.def < 0;
+        DWORD need = it.kind == kSlider ? 2 : it.kind == kToggle ? 1 : autoColor ? 4 : 3;
         if (at + need > n - 1) return false;
         if (it.kind == kSlider) vals.push_back(it.min + ((d[at] << 8) | d[at + 1]) * it.step);
         else if (it.kind == kToggle) vals.push_back(d[at] != 0);
-        else vals.push_back((d[at] << 16) | (d[at + 1] << 8) | d[at + 2]);
+        else if (autoColor && d[at]) vals.push_back(-1);
+        else { BYTE* c = d + at + autoColor; vals.push_back((c[0] << 16) | (c[1] << 8) | c[2]); }
         at += need;
     }
     return at == n - 1;
@@ -353,6 +406,17 @@ static Update ParseRelease(const std::string& json, const std::wstring& repo)
     return u;
 }
 
+static bool OwnDir(const std::wstring& dir, const std::wstring& local)
+{
+    return !local.empty() && !_wcsicmp((local + L"\\" + app::Name + L"\\").c_str(), dir.c_str());
+}
+
+static void ReloadShell()
+{
+    if (HWND t = FindWindowW(app::TrayClass, nullptr)) PostMessageW(t, app::ShellReload, 0, 0);
+    else std::thread(app::RestartShell).detach();
+}
+
 static bool BuiltInsValid();
 static bool TemplateIsMain(const wchar_t* ini);
 
@@ -361,6 +425,7 @@ static int SelfTest(const wchar_t* tmpl)
     if (tmpl && !TemplateIsMain(tmpl)) return 11;
     for (int i : kCoded) V(i) = g_items[i].kind == kColor ? 0xA1B2C3 : g_items[i].max;
     V(iPanelTint) = 0.25;
+    V(iHoverColor) = -1;
     auto code = Encode();
     std::vector<double> vals;
     if (!Parse(code, vals) || !SameAsCurrent(code)) return 1;
@@ -375,7 +440,12 @@ static int SelfTest(const wchar_t* tmpl)
     if (!ParseRelease("{\"tag_name\":\"v2\",\"browser_download_url\":\"https://evil.example/OpalBarInstall.exe\"}", L"o/r").installer.empty() ||
         !ParseRelease("{\"tag_name\":\"v2\",\"browser_download_url\":\"https://github.com/x/y/releases/download/v2/OpalBarInstall.exe\"}", L"o/r").installer.empty() ||
         ParseRelease("oops", L"o/r").ok) return 6;
-    if (!Parse(L"GB1-AQAAKQAMABQADgAKAA8ACgAAAB4pKSnY", vals) || vals.size() != std::size(kCoded) || std::abs(vals[vals.size() - 3] - 0.3) > 1e-9 || vals[vals.size() - 2] != 0 || vals.back() != 40) return 7;
+    auto at = [&](int i) { return vals[std::find(std::begin(kCoded), std::end(kCoded), i) - std::begin(kCoded)]; };
+    if (!Parse(L"GB1-AQAAKQAMABQADgAKAA8ACgAAAB4pKSnY", vals) || vals.size() != std::size(kCoded) || std::abs(at(iPanelTint) - 0.3) > 1e-9 ||
+        at(iOffset) != 0 || at(iHeight) != 40 || at(iAnim) != cfg::AnimationTime.def || at(iHoverColor) != -1 || at(iRimColor) != cfg::RimColorDef) return 7;
+    std::wstring local = L"C:\\Users\\a\\AppData\\Local";
+    if (!OwnDir(local + L"\\OpalBar\\", local) || !OwnDir(L"c:\\users\\a\\appdata\\local\\opalbar\\", local) || OwnDir(L"C:\\", local) ||
+        OwnDir(local + L"\\OpalBar2\\", local) || OwnDir(local + L"\\", local) || OwnDir(L"\\OpalBar\\", L"")) return 12;
     if (!BuiltInsValid()) return 8;
     if (FromHex(ToHex(L"Тест Æ 漢")) != L"Тест Æ 漢") return 9;
     for (auto& p : kRu) if (!*p[0] || !*p[1] || (g_ru = true, Tr(p[0]) != p[1])) return 10;
@@ -415,7 +485,7 @@ static void Toast(HWND w, const std::wstring& text)
 
 struct Preset { int n; std::wstring name, code; };
 static const Preset kBuiltIn[] = {
-    { 0, L"Main", L"GB1-AQAAKQAJABQACgAKAA8ACgAAACgpKSkARgAEABBP" },
+    { 0, L"Main", L"GB1-AQAAKQANABQADgAPAA8ABQABACEgICAAMgAFAA8AFP///wAAAAABAAAAACgBAQAAAAAFAAEAAABc" },
     { 0, L"Matte", L"GB1-AQEAKQALAAAABAAUAAAAAAAAAB4pKSkANwAEABDw" },
     { 0, L"TintedGlass", L"GB1-AQEAKQALAAAABQAAAB4ABQAAADIpKSkAMgAEABAH" },
     { 0, L"TintedGlassRound", L"GB1-AQAAKQAMABQADgAAAA8ABAACAC0pKSkALQAEABA4" },
@@ -576,6 +646,8 @@ static void Text(Graphics& g, const std::wstring& s, RectF r, float size, Color 
 }
 
 static Color White(BYTE a) { return Color(a, 255, 255, 255); }
+static Color Rgb(double v, BYTE a) { auto c = (unsigned)v; return Color(a, BYTE(c >> 16), BYTE(c >> 8), BYTE(c)); }
+static BYTE Alpha(double a) { return BYTE(std::clamp(a, 0.0, 1.0) * 255); }
 static const Color kText = White(0xF2), kSub = White(0xB0), kMuted = White(0x60), kInk(255, 24, 24, 26);
 constexpr BYTE kTile = 0x20, kTileHot = 0x38, kEdge = 0x30, kTrackA = 0x48, kFillA = 0xE6, kHair = 0x1C;
 static Color g_accent(255, 76, 194, 255);
@@ -673,13 +745,15 @@ static void DrawGlass(Graphics& g, Bitmap& base, RectF r, float rad, Glass kind 
     g.ResetClip();
 
     double spec = kind == gPanel ? cfg::Specular.def : V(iSpecular), glow = kind == gPanel ? cfg::BorderGlow.def : V(iGlow);
+    double rc = kind == gPanel ? 0xFFFFFF : V(iRimColor);
+    float rw = kind == gPanel ? S(1.5f) : S((float)V(iRimWidth));
     LinearGradientBrush rimBrush(PointF(0, r.Y), PointF(0, r.GetBottom()), White(0), White(0));
-    Color cols[] = { White(BYTE(cfg::RimAlpha(cfg::Specular, spec) * 255)), White(BYTE(cfg::RimMid(spec, glow) * 255)),
-                     White(BYTE(cfg::RimAlpha(cfg::BorderGlow, glow) * 255)) };
+    Color cols[] = { Rgb(rc, Alpha(cfg::RimAlpha(cfg::Specular, spec))), Rgb(rc, Alpha(cfg::RimMid(spec, glow))),
+                     Rgb(rc, Alpha(cfg::RimAlpha(cfg::BorderGlow, glow))) };
     REAL pos[] = { 0, 0.5f, 1 };
     rimBrush.SetInterpolationColors(cols, pos, 3);
-    Pen rim(&rimBrush, S(1.5f));
-    GraphicsPath edge; RoundRect(edge, RectF(r.X + 0.5f, r.Y + 0.5f, r.Width - 1, r.Height - 1), rad);
+    Pen rim(&rimBrush, rw);
+    GraphicsPath edge; RoundRect(edge, RectF(r.X + rw / 2, r.Y + rw / 2, r.Width - rw, r.Height - rw), rad);
     g.DrawPath(&rim, &edge);
 }
 
@@ -696,6 +770,15 @@ static void DrawDesk(Graphics& o, Bitmap& base, float W, float H)
     RectF pill((W - trayW - gap - pillW) / 2, pillY, pillW, pillH);
     RectF tray(W - gap - trayW, pillY, trayW, pillH);
     if (full) pill = RectF(0, pillY, W, pillH);
+    auto shadow = [&](RectF r) {
+        for (int k = 1; k <= 6; k++) {
+            double a = V(iShadow) * 0.5 * std::pow(1 - (k - 1) / 6.0, 2);
+            float d = S(k - 0.5f);
+            if (a > 0) StrokeRound(o, RectF(r.X - d, r.Y - d, r.Width + 2 * d, r.Height + 2 * d), rad + S((float)k), Color(Alpha(a), 0, 0, 0), S(1));
+        }
+    };
+    shadow(pill);
+    if (!full) shadow(tray);
     DrawGlass(o, base, pill, rad);
     if (!full) DrawGlass(o, base, tray, rad);
 
@@ -720,35 +803,51 @@ static void DrawDesk(Graphics& o, Bitmap& base, float W, float H)
     float x0 = pill.X + (pill.Width - content) / 2 + (slot - icon) / 2;
     {
         RectF hl(x0 + slot - (slot - icon) / 2 + S(2), pill.Y + S(2), slot - S(4), pill.Height - S(4));
-        FillRound(o, hl, S((float)std::min(V(iHl), std::max(4.0, V(iRadius) - 2))), White(0x24));
+        BYTE ha = Alpha(0x24 / 255.0 * V(iHover));
+        FillRound(o, hl, S((float)std::min(V(iHl), std::max(4.0, V(iRadius) - 2))), V(iHoverColor) < 0 ? White(ha) : Rgb(V(iHoverColor), ha));
     }
     for (int i = 0; i < n; i++) {
         RectF ir(x0 + i * slot, pill.Y + (pill.Height - icon) / 2 - S(1), icon, icon);
         FillRound(o, ir, S(6), Color(224, 237, 237, 237));
         FillRound(o, RectF(ir.X, ir.Y + ir.Height / 2, ir.Width, ir.Height / 2), S(6), Color(40, 20, 20, 21));
-        if (i == 2 || i == 4 || i == 5) {
+        if (V(iIndicator) && (i == 2 || i == 4 || i == 5)) {
             bool focused = i == 4;
             float w = S(focused ? 16.f : 6.f);
-            FillRound(o, RectF(ir.X + (icon - w) / 2, pill.GetBottom() - S(5), w, S(3)), S(1.5f), focused ? g_accent : Color(200, 237, 237, 237));
+            Color c = focused ? g_accent : Color(200, 237, 237, 237);
+            if (V(iIndColor) >= 0) c = Rgb(V(iIndColor), c.GetA());
+            FillRound(o, RectF(ir.X + (icon - w) / 2, pill.GetBottom() - S(5), w, S(3)), S(1.5f), c);
         }
     }
     if (full) return;
     for (int i = 0; i < 3; i++)
         FillRound(o, RectF(tray.X + S(16) + i * S(24), tray.Y + tray.Height / 2 - S(6), S(12), S(12)), S(4), Color(210, 237, 237, 237));
-    Text(o, L"12:00", RectF(tray.X + S(80), tray.Y, S(56), tray.Height), 12, White(0xF0), kRegular, StringAlignmentFar);
+    Text(o, L"12:00", RectF(tray.X + S(72), tray.Y, S(64), tray.Height), float(12 * V(iClockSize)),
+         V(iClockColor) < 0 ? White(0xF0) : Rgb(V(iClockColor), 0xF0), V(iClockBold) ? kSemibold : kRegular, StringAlignmentFar);
 }
 
-static RectF g_pane, g_cardL, g_cardR, g_cardStart, g_bgPane;
-static constexpr float kWinW = 880, kWinH = 872;
+static float TextW(const wchar_t* s, float size)
+{
+    Bitmap bmp(1, 1);
+    Graphics g(&bmp);
+    FontFamily fam(FaceName(kRegular));
+    Font f(&fam, S(size), FontStyleRegular, UnitPixel);
+    RectF r;
+    g.MeasureString(s, -1, &f, PointF(0, 0), &r);
+    return r.Width;
+}
+
+static RectF g_pane, g_cardL, g_cardR, g_cardX, g_cardStart, g_bgPane;
+static constexpr float kWinW = 1100, kWinH = 924;
 
 static void Layout()
 {
-    float m = S(24), col = (S(kWinW) - 2 * m) / 2, top = S(20), head = S(56), rows = S(52 + 8 * 52 + 8), foot = S(108);
+    float m = S(24), col = (S(kWinW) - 2 * m) / 3, top = S(20), head = S(56), rows = S(52 + 9 * 52 + 8), foot = S(108);
     float bgLabel = S(g_ru ? 40.f : 84.f);
-    g_pane = RectF(m, top, 2 * col, head + rows + foot);
+    g_pane = RectF(m, top, 3 * col, head + rows + foot);
     g_cardL = RectF(m, top + head, col, rows);
     g_cardR = RectF(m + col, top + head, col, rows);
-    g_cardStart = RectF(m, top + head + rows, 2 * col, foot);
+    g_cardX = RectF(m + 2 * col, top + head, col, rows);
+    g_cardStart = RectF(m, top + head + rows, 3 * col, foot);
     g_bgPane = RectF(m, g_pane.GetBottom() + S(16), S(12 + 3 * 84 + 2 * 8 + 12) + bgLabel, S(44));
     auto row = [&](RectF c, int i) { return RectF(c.X + S(20), c.Y + S(52) + i * S(52), c.Width - S(40), S(40)); };
     for (int i = iDynamic; i <= iHl; i++) g_items[i].box = row(g_cardL, i - iDynamic);
@@ -757,16 +856,24 @@ static void Layout()
     g_items[iHeight].box = row(g_cardL, 6);
     g_items[iOffset].box = row(g_cardL, 7);
     g_items[iTint].box = row(g_cardR, 6);
-    g_items[iAutostart].box = RectF(g_cardStart.X + S(20), g_cardStart.Y + S(12), col - S(40), S(40));
+    g_items[iRimColor].box = row(g_cardR, 7);
+    g_items[iRimWidth].box = row(g_cardR, 8);
+    int details[] = { iAnim, iShadow, iHoverColor, iHover, iIndicator, iIndColor, iClockSize, iClockBold, iClockColor };
+    for (int k = 0; k < (int)std::size(details); k++) g_items[details[k]].box = row(g_cardX, k);
+    auto toggleW = [](int i) { return std::ceil(TextW(Tr(g_items[i].label), 13)) + S(16 + 40); };
+    g_items[iAutostart].box = RectF(g_cardStart.X + S(20), g_cardStart.Y + S(12), toggleW(iAutostart), S(40));
+    g_items[iTray].box = RectF(g_items[iAutostart].box.GetRight() + S(32), g_cardStart.Y + S(12), toggleW(iTray), S(40));
     g_items[iImport].box = RectF(g_cardStart.GetRight() - S(20) - S(96), g_cardStart.Y + S(16), S(96), S(32));
     g_items[iExport].box = RectF(g_items[iImport].box.X - S(8) - S(96), g_cardStart.Y + S(16), S(96), S(32));
     g_items[iLang].box = RectF(g_items[iExport].box.X - S(8) - S(96), g_cardStart.Y + S(16), S(96), S(32));
+    g_items[iUninstall].box = RectF(g_items[iLang].box.X - S(8) - S(96), g_cardStart.Y + S(16), S(96), S(32));
     g_items[iApply].box = RectF(g_items[iImport].box.X, g_cardStart.Y + S(60), S(96), S(32));
     g_items[iCode].box = RectF(g_cardStart.X + S(20), g_cardStart.Y + S(60), g_items[iApply].box.X - S(8) - g_cardStart.X - S(20), S(32));
     g_items[iReset].box = RectF(g_pane.GetRight() - S(20) - S(112), top + S(12), S(112), S(32));
     g_items[iUpdate].box = RectF(g_items[iReset].box.X - S(8) - S(192), top + S(12), S(192), S(32));
     g_items[iPresets].box = RectF(g_items[iUpdate].box.X - S(8) - S(160), top + S(12), S(160), S(32));
     g_items[iEnabled].box = RectF(g_pane.X + S(200), top + S(8), S(112), S(40));
+    g_items[iReload].box = RectF(g_pane.X + S(328), top + S(12), S(120), S(32));
     g_items[iAuto].box = RectF(g_cardR.GetRight() - S(20) - S(72), g_cardR.Y + S(8), S(72), S(32));
     for (int i = iBgWall; i <= iBgColor; i++)
         g_items[i].box = RectF(g_bgPane.X + S(12) + bgLabel + (i - iBgWall) * S(92), g_bgPane.Y + S(8), S(84), S(28));
@@ -775,6 +882,7 @@ static void Layout()
     g_items[iWidth].enabled = !full && !dyn;
     g_items[iPadding].enabled = !full && dyn;
     g_items[iOffset].enabled = MarginV() > 0;
+    g_items[iIndColor].enabled = V(iIndicator) != 0;
 }
 
 static RectF MenuRow(int i)
@@ -820,7 +928,7 @@ static void DrawItem(Graphics& g, int i)
     bool hot = it.enabled && (i == g_hover || i == g_drag || (i == g_focus && g_keyboard));
     if (it.kind == kSlider) {
         Text(g, Tr(it.label), RectF(it.box.X, it.box.Y, it.box.Width, S(20)), 13, text);
-        wchar_t v[32]; swprintf_s(v, it.fmt, it.v * it.shown);
+        wchar_t v[32]; swprintf_s(v, Tr(it.fmt), it.v * it.shown);
         Text(g, v, RectF(it.box.X, it.box.Y, it.box.Width, S(20)), 12, it.enabled ? kSub : kMuted, kRegular, StringAlignmentFar);
         RectF tr = Track(it);
         float f = (float)((it.v - it.min) / (it.max - it.min));
@@ -841,11 +949,11 @@ static void DrawItem(Graphics& g, int i)
     } else if (it.kind == kColor) {
         Text(g, Tr(it.label), it.box, 13, text);
         RectF sw(it.box.GetRight() - S(40), it.box.Y + (it.box.Height - S(24)) / 2, S(40), S(24));
-        COLORREF c = (COLORREF)it.v;
-        FillRound(g, sw, S(6), Color(255, BYTE(c >> 16), BYTE(c >> 8), BYTE(c)));
+        bool stock = it.v < 0;
+        FillRound(g, sw, S(6), stock ? White(it.enabled ? 0x18 : 0x08) : Rgb(it.v, it.enabled ? 255 : 0x60));
         StrokeRound(g, sw, S(6), White(hot ? 0x90 : 0x40), S(1));
-        wchar_t hex[16]; swprintf_s(hex, L"#%06X", (unsigned)c);
-        Text(g, hex, RectF(it.box.X, it.box.Y, it.box.Width - S(52), it.box.Height), 12, kSub, kRegular, StringAlignmentFar);
+        wchar_t hex[16]; swprintf_s(hex, L"#%06X", (unsigned)std::max(0.0, it.v));
+        Text(g, stock ? Tr(L"Auto") : hex, RectF(it.box.X, it.box.Y, it.box.Width - S(52), it.box.Height), 12, it.enabled ? kSub : kMuted, kRegular, StringAlignmentFar);
     } else if (i == iCode) {
         FillRound(g, it.box, S(8), Color(255, GetRValue(kWell), GetGValue(kWell), GetBValue(kWell)));
         StrokeRound(g, it.box, S(8), White(GetFocus() == g_edit ? 0x80 : kEdge), S(1));
@@ -891,6 +999,8 @@ static void Paint(HWND w, HDC dc)
     g.FillRectangle(&hair, g_pane.X, g_cardL.Y, g_pane.Width, S(1));
     g.FillRectangle(&hair, g_pane.X, g_cardStart.Y, g_pane.Width, S(1));
     g.FillRectangle(&hair, g_cardR.X, g_cardL.Y, S(1), g_cardL.Height);
+    g.FillRectangle(&hair, g_cardX.X, g_cardL.Y, S(1), g_cardL.Height);
+    Text(g, Tr(L"Details"), RectF(g_cardX.X + S(20), g_cardX.Y + S(12), g_cardX.Width, S(24)), 14, kText, kSemibold);
     Text(g, Tr(L"Geometry"), RectF(g_cardL.X + S(20), g_cardL.Y + S(12), g_cardL.Width, S(24)), 14, kText, kSemibold);
     Text(g, Tr(L"Glass"), RectF(g_cardR.X + S(20), g_cardR.Y + S(12), g_cardR.Width, S(24)), 14, kText, kSemibold);
     Text(g, Tr(L"Background"), RectF(g_bgPane.X + S(12), g_bgPane.Y, S(84), g_bgPane.Height), 13, kText);
@@ -967,6 +1077,8 @@ static void SlideTo(HWND w, int i, float x)
     Change(w, i, it.min + std::clamp((x - tr.X) / tr.Width, 0.f, 1.f) * (it.max - it.min));
 }
 
+static void Uninstall(HWND w);
+
 static void Activate(HWND w, int i)
 {
     auto& it = g_items[i];
@@ -976,15 +1088,20 @@ static void Activate(HWND w, int i)
     }
     else if (it.kind == kColor) {
         static COLORREF custom[16];
-        COLORREF c = (COLORREF)it.v;
+        COLORREF c = (COLORREF)std::max(0.0, it.v);
         CHOOSECOLORW cc{ sizeof(cc), w };
         cc.rgbResult = RGB(c >> 16 & 255, c >> 8 & 255, c & 255);
         cc.lpCustColors = custom;
         cc.Flags = CC_RGBINIT | CC_FULLOPEN;
         if (ChooseColorW(&cc)) Change(w, i, (double)((GetRValue(cc.rgbResult) << 16) | (GetGValue(cc.rgbResult) << 8) | GetBValue(cc.rgbResult)));
     } else if (i == iAuto) {
-        for (int j = iBlur; j <= iTint; j++) Change(w, j, g_items[j].def);
-        Change(w, iPanelTint, g_items[iPanelTint].def);
+        for (int j : { iBlur, iRefraction, iSpecular, iGlow, iTintOpacity, iTint, iPanelTint, iRimColor, iRimWidth }) Change(w, j, g_items[j].def);
+    } else if (i == iReload) {
+        ReloadShell();
+        ShellExecuteW(nullptr, nullptr, (g_dir + app::LoaderExe).c_str(), nullptr, g_dir.c_str(), SW_HIDE);
+        Toast(w, Tr(L"Restarting Explorer…"));
+    } else if (i == iUninstall) {
+        Uninstall(w);
     } else if (i == iReset) {
         Decode(w, kBuiltIn[0].code);
     } else if (i == iExport) {
@@ -1035,6 +1152,31 @@ static void Activate(HWND w, int i)
         LoadWallpaper();
         InvalidateRect(w, nullptr, FALSE);
     }
+}
+
+static void Uninstall(HWND w)
+{
+    if (MessageBoxW(w, Tr(L"Remove OpalBar from this PC? Your settings and presets will be deleted. Explorer will restart."), app::Name, MB_OKCANCEL | MB_ICONQUESTION) != IDOK) return;
+    app::StopLoader();
+    Sleep(300);
+    app::KillByName(app::LoaderExe);
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, app::RunKey, 0, KEY_SET_VALUE, &k) == ERROR_SUCCESS) { RegDeleteValueW(k, app::Name); RegCloseKey(k); }
+    wchar_t desk[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, desk))) DeleteFileW((std::wstring(desk) + L"\\OpalBar.lnk").c_str());
+    app::RestartShell();
+    wchar_t local[MAX_PATH];
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH) && OwnDir(g_dir, local)) {
+        std::wstring cmd = L"cmd.exe /c ping -n 4 127.0.0.1 >nul & rmdir /s /q \"" + g_dir.substr(0, g_dir.size() - 1) + L"\"";
+        STARTUPINFOW si{ sizeof(si) };
+        PROCESS_INFORMATION pi;
+        wchar_t dir[MAX_PATH];
+        GetEnvironmentVariableW(L"TEMP", dir, MAX_PATH);
+        if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, dir, &si, &pi)) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+    }
+    g_pending = 0;
+    KillTimer(w, 1);
+    DestroyWindow(w);
 }
 
 static void MoveFocus(HWND w, int dir)
@@ -1120,6 +1262,16 @@ static LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     }
+    case WM_RBUTTONDOWN: {
+        int i = HitTest((float)GET_X_LPARAM(lp), (float)GET_Y_LPARAM(lp));
+        if (!g_menu && i >= 0 && g_items[i].kind == kColor) Change(w, i, g_items[i].def);
+        return 0;
+    }
+    case WM_ACTIVATE:
+        if (!(g_pending & (1ull << iEnabled))) V(iEnabled) = GetPrivateProfileIntW(L"App", L"Enabled", 1, g_ini.c_str()) != 0;
+        if (!(g_pending & (1ull << iTray))) V(iTray) = GetPrivateProfileIntW(L"App", L"TrayIcon", 1, g_ini.c_str()) != 0;
+        InvalidateRect(w, nullptr, FALSE);
+        break;
     case WM_MOUSELEAVE:
         g_hover = -1;
         InvalidateRect(w, nullptr, FALSE);
@@ -1180,7 +1332,7 @@ static LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == 2) { KillTimer(w, 2); g_toast.clear(); InvalidateRect(w, nullptr, FALSE); return 0; }
         KillTimer(w, 1);
         for (int i = 0; i < (int)g_items.size(); i++)
-            if (g_pending & (1u << i)) WriteItem(i);
+            if (g_pending & (1ull << i)) WriteItem(i);
         g_pending = 0;
         return 0;
     case WM_UPDATE: {
@@ -1206,7 +1358,7 @@ static LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_DPICHANGED: {
-        g_s = HIWORD(wp) / 96.f;
+        g_s = HIWORD(wp) / 96.f * g_fit;
         PlaceEdit();
         auto r = (RECT*)lp;
         SetWindowPos(w, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1265,9 +1417,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int show)
     g_s = GetDpiForSystem() / 96.f;
     RECT r{ 0, 0, (LONG)S(kWinW), (LONG)S(kWinH) };
     AdjustWindowRectExForDpi(&r, style, FALSE, 0, GetDpiForSystem());
-    HWND w = CreateWindowExW(0, wc.lpszClassName, Tr(L"OpalBar Settings"), style, CW_USEDEFAULT, CW_USEDEFAULT,
+    RECT wa;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    g_fit = std::min({ 1.f, float(wa.bottom - wa.top) / (r.bottom - r.top), float(wa.right - wa.left) / (r.right - r.left) });
+    g_s *= g_fit;
+    r = { 0, 0, (LONG)S(kWinW), (LONG)S(kWinH) };
+    AdjustWindowRectExForDpi(&r, style, FALSE, 0, GetDpiForSystem());
+    HWND w = CreateWindowExW(0, wc.lpszClassName, Tr(L"OpalBar Settings"), style, wa.left + (wa.right - wa.left - (r.right - r.left)) / 2, wa.top + (wa.bottom - wa.top - (r.bottom - r.top)) / 2,
                              r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);
-    g_s = GetDpiForWindow(w) / 96.f;
+    g_s = GetDpiForWindow(w) / 96.f * g_fit;
     g_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, w, nullptr, inst, nullptr);
     g_editProc = (WNDPROC)SetWindowLongPtrW(g_edit, GWLP_WNDPROC, (LONG_PTR)EditProc);
     SendMessageW(g_edit, EM_SETLIMITTEXT, kMaxCode, 0);

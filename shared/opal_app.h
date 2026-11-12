@@ -5,12 +5,15 @@
 
 namespace app {
 inline constexpr wchar_t Name[] = L"OpalBar";
-inline constexpr wchar_t Version[] = L"1.0.0";
+inline constexpr wchar_t Version[] = L"1.1.0";
 inline constexpr wchar_t LoaderExe[] = L"OpalBar.exe", TapDll[] = L"OpalTap.dll", SettingsExe[] = L"OpalBarSettings.exe",
                          InstallerExe[] = L"OpalBarInstall.exe";
 inline constexpr wchar_t LoaderMutex[] = L"Local\\OpalBarLoader";
 inline constexpr wchar_t StopEvent[] = L"Local\\OpalBarStop";
 inline constexpr wchar_t ReadyPrefix[] = L"Local\\OpalBarReady_";
+inline constexpr wchar_t TrayClass[] = L"OpalBarTray";
+inline constexpr UINT TrayChanged = WM_APP + 2;
+inline constexpr UINT ShellReload = WM_APP + 3;
 inline constexpr wchar_t RunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 inline int KillByName(const wchar_t* exe)

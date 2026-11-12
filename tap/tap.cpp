@@ -16,6 +16,7 @@
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.System.Power.h>
 #include <winrt/Windows.UI.h>
+#include <winrt/Windows.UI.Text.h>
 #include <winrt/Windows.UI.Composition.h>
 #include <winrt/Windows.UI.ViewManagement.h>
 #include <winrt/Windows.UI.Xaml.h>
@@ -64,6 +65,9 @@ struct Config {
     bool fullWidth; double hlRadius;
     double panelTint;
     double offsetY;
+    double anim, rimWidth, shadow, hover, clockSize;
+    int rimColor, hoverColor, indColor, clockColor;
+    bool indicator, clockBold;
 };
 
 static double ReadF(const wchar_t* key, double def)
@@ -75,17 +79,34 @@ static double ReadF(const wchar_t* key, double def)
 
 static double Read(cfg::Range r) { return std::clamp(ReadF(r.key, r.def), r.min, r.max); }
 
-static Config LoadConfig()
+static int ReadColor(const wchar_t* key, int def)
 {
     wchar_t b[16];
-    GetPrivateProfileStringW(L"Taskbar", cfg::TintColorKey, L"", b, 16, g_ini.c_str());
-    unsigned rgb = *b ? wcstoul(b + (*b == L'#'), nullptr, 16) : cfg::TintColorDef;
-    return { Read(cfg::DynamicWidth) != 0, ReadF(cfg::Width.key, cfg::Width.def), Read(cfg::Padding),
+    GetPrivateProfileStringW(L"Taskbar", key, L"", b, 16, g_ini.c_str());
+    return *b ? int(wcstoul(b + (*b == L'#'), nullptr, 16) & 0xFFFFFF) : def;
+}
+
+static Config LoadConfig()
+{
+    unsigned rgb = ReadColor(cfg::TintColorKey, cfg::TintColorDef);
+    Config c{ Read(cfg::DynamicWidth) != 0, ReadF(cfg::Width.key, cfg::Width.def), Read(cfg::Padding),
              Read(cfg::MarginV), Read(cfg::CornerRadius),
              (float)Read(cfg::BlurAmount), (float)Read(cfg::Refraction),
              Read(cfg::Specular), Read(cfg::BorderGlow), Read(cfg::TintOpacity),
              { 255, BYTE(rgb >> 16), BYTE(rgb >> 8), BYTE(rgb) },
              Read(cfg::FullWidth) != 0, Read(cfg::HighlightRadius), Read(cfg::PanelTintOpacity), Read(cfg::OffsetY) };
+    c.anim = Read(cfg::AnimationTime);
+    c.rimWidth = Read(cfg::RimWidth);
+    c.shadow = Read(cfg::Shadow);
+    c.hover = Read(cfg::HoverStrength);
+    c.clockSize = Read(cfg::ClockSize);
+    c.rimColor = ReadColor(cfg::RimColorKey, cfg::RimColorDef);
+    c.hoverColor = ReadColor(cfg::HoverColorKey, cfg::Stock);
+    c.indColor = ReadColor(cfg::IndicatorColorKey, cfg::Stock);
+    c.clockColor = ReadColor(cfg::ClockColorKey, cfg::Stock);
+    c.indicator = Read(cfg::ShowIndicator) != 0;
+    c.clockBold = Read(cfg::ClockBold) != 0;
+    return c;
 }
 
 static std::mutex g_lock;
@@ -147,7 +168,7 @@ struct GlassBrush : wux::Media::XamlCompositionBrushBaseT<GlassBrush> {
     void OnDisconnected() { CompositionBrush(nullptr); }
 };
 
-enum class Kind { Glass, Clear, Round, Highlight, Dot, Light, Bright, Tile, Hide };
+enum class Kind { Glass, Clear, Round, Highlight, Dot, Light, Bright, Tile, Hide, Indicator, Clock };
 struct Target {
     const wchar_t* type; const wchar_t* name;
     const wchar_t* ancestor; int depth;
@@ -163,6 +184,9 @@ static const Target g_targets[] = {
     { L"Windows.UI.Xaml.Controls.Border", L"BackgroundElement", L"IconPanel", 1, Kind::Highlight, 0, 0 },
     { L"Windows.UI.Xaml.Controls.Border", L"BackgroundElement", L"Taskbar.TaskListLabeledButtonPanel", 1, Kind::Highlight, 0, 0 },
     { L"Windows.UI.Xaml.Controls.Border", L"MultiWindowElement", nullptr, 0, Kind::Hide, 0, 0 },
+    { L"Windows.UI.Xaml.Shapes.Rectangle", L"RunningIndicator", L"IconPanel", 1, Kind::Indicator, 0, 0 },
+    { L"Windows.UI.Xaml.Controls.TextBlock", L"TimeInnerTextBlock", L"DateTimeStackPanel", 1, Kind::Clock, 0, 0 },
+    { L"Windows.UI.Xaml.Controls.TextBlock", L"DateInnerTextBlock", L"DateTimeStackPanel", 1, Kind::Clock, 0, 0 },
     { L"Windows.UI.Xaml.Controls.Border", L"BackgroundBorder", L"SystemTray.NotifyIconView", 2, Kind::Dot, 0, 0 },
     { L"Windows.UI.Xaml.Controls.Border", L"BackgroundBorder", L"SystemTray.ChevronIconView", 2, Kind::Dot, 0, 0 },
     { L"Windows.UI.Xaml.Controls.Border", L"BackgroundBorder", L"SystemTray.OmniButton", 2, Kind::Highlight, 0, 0 },
@@ -203,6 +227,8 @@ struct Surface : std::enable_shared_from_this<Surface> {
     winrt::Windows::Foundation::IUnknown oursBg{ nullptr }, oursBorder{ nullptr };
     ULONGLONG redoFrom = 0;
     int redos = 0;
+    double baseFont = 0;
+    std::vector<std::pair<wux::DependencyProperty, wf::IInspectable>> saved;
     winrt::Windows::System::DispatcherQueueTimer redoTimer{ nullptr };
     wux::FrameworkElement::Loaded_revoker loadedRev;
     wux::FrameworkElement::LayoutUpdated_revoker layoutRev, trayRev;
@@ -241,7 +267,7 @@ static Rect Ensure(wux::Controls::Panel const& p, const wchar_t* name)
     return r;
 }
 
-static wux::Media::LinearGradientBrush Gradient(bool vertical, std::initializer_list<std::pair<double, double>> stops)
+static wux::Media::LinearGradientBrush Gradient(bool vertical, int rgb, std::initializer_list<std::pair<double, double>> stops)
 {
     wux::Media::LinearGradientBrush g;
     g.StartPoint({ vertical ? 0.5f : 0.f, vertical ? 0.f : 0.5f });
@@ -249,7 +275,7 @@ static wux::Media::LinearGradientBrush Gradient(bool vertical, std::initializer_
     for (auto [off, a] : stops) {
         wux::Media::GradientStop s;
         s.Offset(off);
-        s.Color({ BYTE(std::clamp(a, 0.0, 1.0) * 255), 255, 255, 255 });
+        s.Color({ BYTE(std::clamp(a, 0.0, 1.0) * 255), BYTE(rgb >> 16), BYTE(rgb >> 8), BYTE(rgb) });
         g.GradientStops().Append(s);
     }
     return g;
@@ -270,12 +296,30 @@ static winrt::Windows::UI::Color TintOf(Config const& c)
 
 static wux::Media::Brush Rim(Config const& c)
 {
-    return Gradient(true, { { 0, cfg::RimAlpha(cfg::Specular, c.specular) }, { 0.5, cfg::RimMid(c.specular, c.glow) },
+    return Gradient(true, c.rimColor, { { 0, cfg::RimAlpha(cfg::Specular, c.specular) }, { 0.5, cfg::RimMid(c.specular, c.glow) },
                             { 1, cfg::RimAlpha(cfg::BorderGlow, c.glow) } });
 }
-constexpr double kRim = 1.5;
+static void Shadow(wux::Controls::Panel const& panel, Config const& c, double radius, bool on)
+{
+    constexpr int kRings = 6;
+    for (int k = 1; k <= kRings; k++) {
+        auto name = L"GlassShadow" + std::to_wstring(k);
+        double a = on ? c.shadow * 0.5 * std::pow(1 - (k - 1.0) / kRings, 2) : 0;
+        Rect r{ nullptr };
+        for (auto ch : panel.Children())
+            if (auto fe = ch.try_as<wux::FrameworkElement>(); fe && fe.Name() == name) r = fe.as<Rect>();
+        if (!r && a <= 0) continue;
+        if (!r) r = Ensure(panel, name.c_str());
+        r.Visibility(a > 0 ? wux::Visibility::Visible : wux::Visibility::Collapsed);
+        r.Stroke(wux::Media::SolidColorBrush({ BYTE(a * 255), 0, 0, 0 }));
+        r.StrokeThickness(1);
+        r.Margin({ -double(k), -double(k), -double(k), -double(k) });
+        r.RadiusX(radius + k);
+        r.RadiusY(radius + k);
+    }
+}
 
-static void StyleGlass(wux::Controls::Panel const& panel, Rect const& fill, Config const& c, double radius, float blur)
+static void StyleGlass(wux::Controls::Panel const& panel, Rect const& fill, Config const& c, double radius, float blur, bool shadow = false)
 {
     fill.Fill(MakeGlass(fill, blur, TintOf(c)));
 
@@ -288,9 +332,10 @@ static void StyleGlass(wux::Controls::Panel const& panel, Rect const& fill, Conf
 
     auto rim = Ensure(panel, L"GlassRim");
     rim.Stroke(Rim(c));
-    rim.StrokeThickness(kRim);
+    rim.StrokeThickness(c.rimWidth);
 
     for (auto e : { fill, lens, rim }) { e.RadiusX(radius); e.RadiusY(radius); }
+    Shadow(panel, c, radius, shadow);
 }
 
 static winrt::Windows::Foundation::IUnknown Identity(wux::Media::Brush const& b)
@@ -313,7 +358,7 @@ static void GlassBox(wux::FrameworkElement const& e, Config const& c, double r, 
     wux::Media::Brush clear = wux::Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent());
     wux::Media::Brush bg = glass ? MakeGlass(e, blur, TintOf(c)) : clear;
     wux::Media::Brush border = glass && r > 0 ? Rim(c) : clear;
-    wux::Thickness th = glass && r > 0 ? wux::Thickness{ kRim, kRim, kRim, kRim } : wux::Thickness{};
+    wux::Thickness th = glass && r > 0 ? wux::Thickness{ c.rimWidth, c.rimWidth, c.rimWidth, c.rimWidth } : wux::Thickness{};
     wux::CornerRadius cr{ r, r, r, r };
     auto set = [&](auto const& x) {
         x.Background(bg);
@@ -364,7 +409,7 @@ static double GlideProgress(Glide const& g)
     return 1 - std::pow(1 - t, 3);
 }
 
-static void Place(wux::FrameworkElement const& e, double x, double w, double mv)
+static void Place(wux::FrameworkElement const& e, double x, double w, double mv, double anim)
 {
     auto m = e.Margin();
     double oldW = e.Width(), oldX = m.Left;
@@ -372,7 +417,7 @@ static void Place(wux::FrameworkElement const& e, double x, double w, double mv)
     if (!moved && m.Top == mv && m.Bottom == mv) return;
     e.Width(w);
     e.Margin({ x, mv, 0, mv });
-    if (!moved || std::isnan(oldW) || w <= 0) return;
+    if (!moved || std::isnan(oldW) || w <= 0 || anim < 1) return;
 
     try {
         std::erase_if(t_glides, [](auto const& kv) { return GlideProgress(kv.second) >= 1; });
@@ -383,7 +428,7 @@ static void Place(wux::FrameworkElement const& e, double x, double w, double mv)
             fromW = it->second.fromW + (it->second.toW - it->second.fromW) * p;
         }
         bool shrinking = w < fromW - 0.5;
-        int delayMs = shrinking ? 120 : 0, durMs = shrinking ? 300 : 150;
+        int delayMs = shrinking ? int(anim * 0.8) : 0, durMs = int(shrinking ? anim * 2 : anim);
         t_glides[winrt::get_abi(e)] = { fromX, fromW, x, w, GetTickCount64(), delayMs, durMs };
 
         auto v = wux::Hosting::ElementCompositionPreview::GetElementVisual(e);
@@ -432,6 +477,120 @@ static void HoldFill(Surface& b, wux::Shapes::Shape const& x, winrt::Windows::UI
     });
 }
 
+struct Tinted { wux::Media::SolidColorBrush brush; winrt::Windows::UI::Color orig; bool hover; };
+thread_local std::vector<Tinted> t_tinted;
+thread_local bool t_tinting = false;
+
+static Config Current()
+{
+    std::lock_guard l(g_lock);
+    return g_cfg;
+}
+
+static winrt::Windows::UI::Color Rgb(int rgb, BYTE a) { return { a, BYTE(rgb >> 16), BYTE(rgb >> 8), BYTE(rgb) }; }
+
+static winrt::Windows::UI::Color Want(Tinted const& t, Config const& c)
+{
+    auto o = t.orig;
+    if (!t.hover) {
+        if (!c.indicator) return { 0, o.R, o.G, o.B };
+        return c.indColor == cfg::Stock ? o : Rgb(c.indColor, o.A);
+    }
+    BYTE a = BYTE(std::clamp(o.A * c.hover, 0.0, 255.0));
+    return c.hoverColor == cfg::Stock ? winrt::Windows::UI::Color{ a, o.R, o.G, o.B } : Rgb(c.hoverColor, a);
+}
+
+static void Retint(Tinted& t, Config const& c)
+{
+    auto want = Want(t, c);
+    if (t.brush.Color() == want) return;
+    t_tinting = true;
+    try { t.brush.Color(want); } catch (...) {}
+    t_tinting = false;
+}
+
+static void RetintAll(Config const& c)
+{
+    for (auto& t : t_tinted) Retint(t, c);
+}
+
+static void Tint(wux::Media::Brush const& br, bool hover)
+{
+    auto s = br ? br.try_as<wux::Media::SolidColorBrush>() : nullptr;
+    if (!s) return;
+    auto c = Current();
+    auto id = Identity(s);
+    for (auto& t : t_tinted)
+        if (Identity(t.brush) == id) { Retint(t, c); return; }
+    t_tinted.push_back({ s, s.Color(), hover });
+    s.RegisterPropertyChangedCallback(wux::Media::SolidColorBrush::ColorProperty(), [](wux::DependencyObject const& o, wux::DependencyProperty const&) {
+        if (t_tinting) return;
+        auto id = o.as<winrt::Windows::Foundation::IUnknown>();
+        for (auto& t : t_tinted)
+            if (Identity(t.brush) == id) { t.orig = t.brush.Color(); Retint(t, Current()); return; }
+    });
+    Retint(t_tinted.back(), c);
+}
+
+static void TintHover(Surface& b, wux::FrameworkElement const& bg, Config const& c)
+{
+    auto x = bg.try_as<wux::Controls::Border>();
+    if (!x) return;
+    RetintAll(c);
+    Tint(x.Background(), true);
+    if (b.guarded) return;
+    b.guarded = true;
+    x.RegisterPropertyChangedCallback(wux::Controls::Border::BackgroundProperty(), [](wux::DependencyObject const& o, wux::DependencyProperty const&) {
+        try { Tint(o.as<wux::Controls::Border>().Background(), true); } catch (...) {}
+    });
+}
+
+static void TintIndicator(Surface& b, wux::FrameworkElement const& bg, Config const& c)
+{
+    auto x = bg.try_as<wux::Shapes::Shape>();
+    if (!x) return;
+    RetintAll(c);
+    Tint(x.Fill(), false);
+    if (b.guarded) return;
+    b.guarded = true;
+    x.RegisterPropertyChangedCallback(wux::Shapes::Shape::FillProperty(), [](wux::DependencyObject const& o, wux::DependencyProperty const&) {
+        try { Tint(o.as<wux::Shapes::Shape>().Fill(), false); } catch (...) {}
+    });
+}
+
+static winrt::Windows::Foundation::IUnknown Id(wf::IInspectable const& x)
+{
+    return x ? x.as<winrt::Windows::Foundation::IUnknown>() : nullptr;
+}
+
+static void Keep(Surface& b, wux::DependencyObject const& o, wux::DependencyProperty const& p)
+{
+    for (auto& s : b.saved)
+        if (Id(s.first) == Id(p)) return;
+    b.saved.emplace_back(p, o.ReadLocalValue(p));
+}
+
+static void Restore(Surface& b, wux::DependencyObject const& o, wux::DependencyProperty const& p)
+{
+    for (auto& s : b.saved) {
+        if (Id(s.first) != Id(p)) continue;
+        if (Id(s.second) == Id(wux::DependencyProperty::UnsetValue())) o.ClearValue(p);
+        else try { o.SetValue(p, s.second); } catch (...) { o.ClearValue(p); }
+    }
+}
+
+static void Clock(Surface& b, wux::Controls::TextBlock const& x, Config const& c)
+{
+    using P = wux::Controls::TextBlock;
+    if (!b.baseFont) b.baseFont = x.FontSize();
+    if (std::abs(c.clockSize - 1) < 1e-3) Restore(b, x, P::FontSizeProperty());
+    else { Keep(b, x, P::FontSizeProperty()); x.FontSize(b.baseFont * c.clockSize); }
+    if (!c.clockBold) Restore(b, x, P::FontWeightProperty());
+    else { Keep(b, x, P::FontWeightProperty()); x.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold()); }
+    if (c.clockColor == cfg::Stock) Restore(b, x, P::ForegroundProperty());
+    else { Keep(b, x, P::ForegroundProperty()); x.Foreground(wux::Media::SolidColorBrush(Rgb(c.clockColor, 255))); }
+}
+
 static void Apply(Surface& b) try
 {
     auto bg = b.el.get();
@@ -456,11 +615,17 @@ static void Apply(Surface& b) try
             bg.Margin({ 0, 0, 0, 0 });
             bg.HorizontalAlignment(wux::HorizontalAlignment::Center);
             bg.VerticalAlignment(wux::VerticalAlignment::Center);
+            TintHover(b, bg, c);
         } else if (t.kind == Kind::Highlight) {
             double r = std::min(c.hlRadius, std::max(4.0, c.radius - 2)), v = c.marginV + 2;
             if (auto x = bg.try_as<wux::Controls::Border>()) x.CornerRadius({ r, r, r, r });
             bg.Margin({ 2, v, 2, v });
             bg.VerticalAlignment(wux::VerticalAlignment::Stretch);
+            TintHover(b, bg, c);
+        } else if (t.kind == Kind::Indicator) {
+            TintIndicator(b, bg, c);
+        } else if (t.kind == Kind::Clock) {
+            if (auto x = bg.try_as<wux::Controls::TextBlock>()) Clock(b, x, c);
         } else if (t.kind == Kind::Bright) {
             auto outer = VisualTreeHelper::GetParent(bg).try_as<wux::Controls::Border>();
             if (bg.Name() == L"SliderInnerThumb" && outer) {
@@ -615,7 +780,7 @@ static void Apply(Surface& b) try
     double width = c.fullWidth ? 0 : c.width;
     if (dynamic) {
         bg.HorizontalAlignment(wux::HorizontalAlignment::Left);
-        auto fit = [wbg = winrt::make_weak(bg), wrep = winrt::make_weak(rep), wpar = winrt::make_weak(parent), pad = c.padding, mv = c.marginV] {
+        auto fit = [wbg = winrt::make_weak(bg), wrep = winrt::make_weak(rep), wpar = winrt::make_weak(parent), pad = c.padding, mv = c.marginV, an = c.anim] {
             auto e = wbg.get(); auto r = wrep.get(); auto p = wpar.get();
             if (!e || !r || !p) return;
             double l = INFINITY, rt = -INFINITY;
@@ -627,7 +792,7 @@ static void Apply(Surface& b) try
                 l = std::min(l, (double)pt.X);
                 rt = std::max(rt, pt.X + ch.ActualWidth());
             }
-            if (l < rt) Place(e, std::max(0.0, l - pad), rt - l + 2 * pad, mv);
+            if (l < rt) Place(e, std::max(0.0, l - pad), rt - l + 2 * pad, mv, an);
         };
         fit();
         fits.push_back(fit);
@@ -638,7 +803,7 @@ static void Apply(Surface& b) try
         bg.Width(width > 0 ? width : NAN);
     }
 
-    StyleGlass(panel, fill, c, c.radius, c.blur);
+    StyleGlass(panel, fill, c, c.radius, c.blur, true);
 
     wux::DependencyObject frame = bg;
     while (frame && winrt::get_class_name(frame) != L"Taskbar.TaskbarFrame") frame = VisualTreeHelper::GetParent(frame);
@@ -664,12 +829,12 @@ static void Apply(Surface& b) try
             root.Children().InsertAt(0, pill);
         }
         pill.Visibility(dynamic || width > 0 ? wux::Visibility::Visible : wux::Visibility::Collapsed);
-        StyleGlass(pill, Ensure(pill, L"GlassFill"), c, c.radius, c.blur);
-        auto fitTray = [wp = winrt::make_weak(pill), wt = winrt::make_weak(tray), wr = winrt::make_weak(root), pad = c.padding, mv = c.marginV] {
+        StyleGlass(pill, Ensure(pill, L"GlassFill"), c, c.radius, c.blur, true);
+        auto fitTray = [wp = winrt::make_weak(pill), wt = winrt::make_weak(tray), wr = winrt::make_weak(root), pad = c.padding, mv = c.marginV, an = c.anim] {
             auto p = wp.get(); auto t = wt.get(); auto r = wr.get();
             if (!p || !t || !r || t.ActualWidth() <= 0) return;
             double x = std::max(0.0, t.TransformToVisual(r).TransformPoint({ 0, 0 }).X - pad);
-            Place(p, x, std::min(r.ActualWidth() - x, t.ActualWidth() + 2 * pad), mv);
+            Place(p, x, std::min(r.ActualWidth() - x, t.ActualWidth() + 2 * pad), mv, an);
         };
         fitTray();
         fits.push_back(fitTray);
