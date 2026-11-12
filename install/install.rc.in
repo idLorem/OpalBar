@@ -1,0 +1,5 @@
+1 ICON "@CMAKE_SOURCE_DIR@/assets/opal.ico"
+1 RCDATA "@CMAKE_BINARY_DIR@/OpalBar.exe"
+2 RCDATA "@CMAKE_BINARY_DIR@/OpalTap.dll"
+3 RCDATA "@CMAKE_BINARY_DIR@/OpalBarSettings.exe"
+4 RCDATA "@CMAKE_SOURCE_DIR@/config.ini"

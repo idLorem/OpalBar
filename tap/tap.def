@@ -1,0 +1,5 @@
+LIBRARY OpalTap
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow   PRIVATE
+    GetMsgProc
