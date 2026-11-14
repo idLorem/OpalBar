@@ -447,7 +447,6 @@ static int SelfTest(const wchar_t* tmpl)
     if (!OwnDir(local + L"\\OpalBar\\", local) || !OwnDir(L"c:\\users\\a\\appdata\\local\\opalbar\\", local) || OwnDir(L"C:\\", local) ||
         OwnDir(local + L"\\OpalBar2\\", local) || OwnDir(local + L"\\", local) || OwnDir(L"\\OpalBar\\", L"")) return 12;
     if (!BuiltInsValid()) return 8;
-    for (auto& b : kBuiltIn) if (b.code.size() > kMaxCode) return 13;
     if (Encode().size() > kMaxCode) return 13;
     if (FromHex(ToHex(L"Тест Æ 漢")) != L"Тест Æ 漢") return 9;
     for (auto& p : kRu) if (!*p[0] || !*p[1] || (g_ru = true, Tr(p[0]) != p[1])) return 10;
@@ -502,7 +501,7 @@ static std::wstring g_name;
 static bool BuiltInsValid()
 {
     std::vector<double> vals;
-    for (auto& p : kBuiltIn) if (!Parse(p.code, vals)) return false;
+    for (auto& p : kBuiltIn) if (p.code.size() > kMaxCode || !Parse(p.code, vals)) return false;
     return true;
 }
 
