@@ -5,7 +5,7 @@
 
 namespace app {
 inline constexpr wchar_t Name[] = L"OpalBar";
-inline constexpr wchar_t Version[] = L"1.1.1";
+inline constexpr wchar_t Version[] = L"1.1.2";
 inline constexpr wchar_t LoaderExe[] = L"OpalBar.exe", TapDll[] = L"OpalTap.dll", SettingsExe[] = L"OpalBarSettings.exe",
                          InstallerExe[] = L"OpalBarInstall.exe";
 inline constexpr wchar_t LoaderMutex[] = L"Local\\OpalBarLoader";
