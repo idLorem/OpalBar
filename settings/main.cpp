@@ -191,7 +191,7 @@ static std::unique_ptr<Bitmap> g_strip;
 static std::unique_ptr<Bitmap> g_base, g_back;
 static std::wstring g_toast;
 static HWND g_edit;
-constexpr int kMaxCode = 64;
+constexpr int kMaxCode = 256;
 constexpr COLORREF kWell = RGB(26, 26, 28);
 static std::wstring CodeText() { wchar_t b[kMaxCode + 1] = {}; GetWindowTextW(g_edit, b, kMaxCode + 1); return b; }
 static std::unique_ptr<Bitmap> g_logo;
@@ -447,6 +447,8 @@ static int SelfTest(const wchar_t* tmpl)
     if (!OwnDir(local + L"\\OpalBar\\", local) || !OwnDir(L"c:\\users\\a\\appdata\\local\\opalbar\\", local) || OwnDir(L"C:\\", local) ||
         OwnDir(local + L"\\OpalBar2\\", local) || OwnDir(local + L"\\", local) || OwnDir(L"\\OpalBar\\", L"")) return 12;
     if (!BuiltInsValid()) return 8;
+    for (auto& b : kBuiltIn) if (b.code.size() > kMaxCode) return 13;
+    if (Encode().size() > kMaxCode) return 13;
     if (FromHex(ToHex(L"Тест Æ 漢")) != L"Тест Æ 漢") return 9;
     for (auto& p : kRu) if (!*p[0] || !*p[1] || (g_ru = true, Tr(p[0]) != p[1])) return 10;
     g_ru = false;
