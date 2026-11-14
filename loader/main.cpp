@@ -42,7 +42,8 @@ static HWND WindowOf(const wchar_t* exeName)
         HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
         if (!p) return TRUE;
         wchar_t path[MAX_PATH]; DWORD n = MAX_PATH;
-        bool match = QueryFullProcessImageNameW(p, 0, path, &n) && !_wcsicmp(wcsrchr(path, L'\\') + 1, c.name);
+        const wchar_t* slash = QueryFullProcessImageNameW(p, 0, path, &n) ? wcsrchr(path, L'\\') : nullptr;
+        bool match = slash && !_wcsicmp(slash + 1, c.name);
         CloseHandle(p);
         if (match) c.found = w;
         return !match;

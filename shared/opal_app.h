@@ -20,6 +20,7 @@ inline int KillByName(const wchar_t* exe)
 {
     int n = 0;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
     PROCESSENTRY32W e{ sizeof(e) };
     for (BOOL ok = Process32FirstW(snap, &e); ok; ok = Process32NextW(snap, &e)) {
         if (_wcsicmp(e.szExeFile, exe) || e.th32ProcessID == GetCurrentProcessId()) continue;

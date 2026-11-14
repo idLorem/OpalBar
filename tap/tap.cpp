@@ -457,8 +457,8 @@ static void ReapplyAll()
 {
     if (g_reapply.exchange(true)) return;
     std::lock_guard l(g_lock);
-    for (auto& s : g_surfaces) s->dq.TryEnqueue([s] { g_reapply = false; Apply(*s); });
-    if (g_surfaces.empty()) g_reapply = false;
+    for (auto& s : g_surfaces) s->dq.TryEnqueue([s] { Apply(*s); });
+    g_reapply = false;
 }
 
 constexpr BYTE kOn = 0xCC;
@@ -477,7 +477,7 @@ static void HoldFill(Surface& b, wux::Shapes::Shape const& x, winrt::Windows::UI
     });
 }
 
-struct Tinted { wux::Media::SolidColorBrush brush; winrt::Windows::UI::Color orig; bool hover; };
+struct Tinted { winrt::weak_ref<wux::Media::SolidColorBrush> brush; winrt::Windows::UI::Color orig; bool hover; };
 thread_local std::vector<Tinted> t_tinted;
 thread_local bool t_tinting = false;
 
@@ -502,10 +502,12 @@ static winrt::Windows::UI::Color Want(Tinted const& t, Config const& c)
 
 static void Retint(Tinted& t, Config const& c)
 {
+    auto brush = t.brush.get();
+    if (!brush) return;
     auto want = Want(t, c);
-    if (t.brush.Color() == want) return;
+    if (brush.Color() == want) return;
     t_tinting = true;
-    try { t.brush.Color(want); } catch (...) {}
+    try { brush.Color(want); } catch (...) {}
     t_tinting = false;
 }
 
@@ -520,14 +522,15 @@ static void Tint(wux::Media::Brush const& br, bool hover)
     if (!s) return;
     auto c = Current();
     auto id = Identity(s);
+    std::erase_if(t_tinted, [](Tinted const& t) { return !t.brush.get(); });
     for (auto& t : t_tinted)
-        if (Identity(t.brush) == id) { Retint(t, c); return; }
-    t_tinted.push_back({ s, s.Color(), hover });
+        if (Identity(t.brush.get()) == id) { Retint(t, c); return; }
+    t_tinted.push_back({ winrt::make_weak(s), s.Color(), hover });
     s.RegisterPropertyChangedCallback(wux::Media::SolidColorBrush::ColorProperty(), [](wux::DependencyObject const& o, wux::DependencyProperty const&) {
         if (t_tinting) return;
         auto id = o.as<winrt::Windows::Foundation::IUnknown>();
         for (auto& t : t_tinted)
-            if (Identity(t.brush) == id) { t.orig = t.brush.Color(); Retint(t, Current()); return; }
+            if (auto b = t.brush.get(); b && Identity(b) == id) { t.orig = b.Color(); Retint(t, Current()); return; }
     });
     Retint(t_tinted.back(), c);
 }
@@ -652,14 +655,17 @@ static void CALLBACK OnWinEvent(HWINEVENTHOOK, DWORD ev, HWND w, LONG obj, LONG,
     if (OverVisibleBar(ev == EVENT_OBJECT_HIDE ? &wr : nullptr)) Nudge();
 }
 
-thread_local bool t_watching = false;
+struct WinHooks {
+    HWINEVENTHOOK minimize = nullptr, hide = nullptr;
+    ~WinHooks() { if (minimize) UnhookWinEvent(minimize); if (hide) UnhookWinEvent(hide); }
+};
+thread_local WinHooks t_hooks;
 
 static void WatchWindows()
 {
-    if (t_watching) return;
-    t_watching = true;
-    SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, nullptr, OnWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
-    SetWinEventHook(EVENT_OBJECT_HIDE, EVENT_OBJECT_HIDE, nullptr, OnWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
+    if (t_hooks.minimize) return;
+    t_hooks.minimize = SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, nullptr, OnWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
+    t_hooks.hide = SetWinEventHook(EVENT_OBJECT_HIDE, EVENT_OBJECT_HIDE, nullptr, OnWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
 }
 
 static void Apply(Surface& b) try
@@ -938,9 +944,9 @@ static DWORD WINAPI WatchConfig(void*)
         else last = now;
         Log(L"config reloaded");
         { std::lock_guard l(g_lock); g_cfg = LoadConfig(); }
-        g_reapply = false;
         ReapplyAll();
     }
+    if (h != INVALID_HANDLE_VALUE) FindCloseChangeNotification(h);
     return 0;
 }
 
@@ -964,8 +970,10 @@ struct __declspec(uuid("A6F1C2D4-3B5E-4F7A-9C8D-1E2F3A4B5C6D")) Tap
                 static winrt::Windows::UI::ViewManagement::UISettings ui;
                 auto again = [](const wchar_t* why) {
                     Log(std::wstring(L"shell change: ") + why);
-                    std::thread([] {
-                        for (int ms : { 300, 1200, 3000, 6000 }) { Sleep(ms); g_reapply = false; ReapplyAll(); }
+                    static std::atomic_int gen;
+                    int mine = ++gen;
+                    std::thread([mine] {
+                        for (int ms : { 300, 1200, 3000, 6000 }) { Sleep(ms); if (gen != mine) return; ReapplyAll(); }
                     }).detach();
                 };
                 ui.ColorValuesChanged([again](auto&&, auto&&) { again(L"colours"); });

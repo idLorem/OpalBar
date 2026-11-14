@@ -1166,7 +1166,7 @@ static void Uninstall(HWND w)
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, desk))) DeleteFileW((std::wstring(desk) + L"\\OpalBar.lnk").c_str());
     app::RestartShell();
     wchar_t local[MAX_PATH];
-    if (GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH) && OwnDir(g_dir, local)) {
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, local)) && OwnDir(g_dir, local)) {
         std::wstring cmd = L"cmd.exe /c ping -n 4 127.0.0.1 >nul & rmdir /s /q \"" + g_dir.substr(0, g_dir.size() - 1) + L"\"";
         STARTUPINFOW si{ sizeof(si) };
         PROCESS_INFORMATION pi;
